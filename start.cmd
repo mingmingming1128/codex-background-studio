@@ -9,4 +9,3 @@ if errorlevel 1 (
 )
 node src\server.js
 if errorlevel 1 pause
-

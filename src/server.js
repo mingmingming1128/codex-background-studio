@@ -18,7 +18,7 @@ const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 fs.mkdirSync(DATA, { recursive: true });
 
 const defaults = {
-  image: '', imageName: '', dim: 0.34, blur: 0, surfaceOpacity: 0.78,
+  image: '', imageName: '', dim: 0, blur: 0, surfaceOpacity: 0.78,
   popupBlur: 20, position: 'center', size: 'cover'
 };
 let config = loadConfig();
@@ -166,7 +166,10 @@ function connectTarget(target) {
   if (!target.webSocketDebuggerUrl || sessions.has(target.id)) return;
   const ws = new WebSocket(target.webSocketDebuggerUrl); let seq = 0;
   const send = expression => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ id: ++seq, method: 'Runtime.evaluate', params: { expression, awaitPromise: false } }));
-  ws.addEventListener('open', () => { sessions.set(target.id, { ws, send }); send(desiredEnabled ? injectionSource(config) : removalSource()); });
+  ws.addEventListener('open', () => {
+    sessions.set(target.id, { ws, send });
+    send(desiredEnabled ? injectionSource(config) : removalSource());
+  });
   ws.addEventListener('close', () => sessions.delete(target.id));
   ws.addEventListener('error', () => sessions.delete(target.id));
 }
@@ -228,4 +231,3 @@ server.listen(UI_PORT, HOST, () => {
 });
 
 setInterval(() => { if (desiredEnabled) syncTargets(); }, 1800).unref();
-
