@@ -13,17 +13,19 @@ const ROOT = path.resolve(__dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
 const DATA = path.join(process.env.APPDATA || os.homedir(), 'CodexBackgroundStudio');
 const CONFIG_FILE = path.join(DATA, 'config.json');
+const BACKGROUND_LAUNCHER = path.join(ROOT, 'launch-codex-background.vbs');
 const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 
 fs.mkdirSync(DATA, { recursive: true });
 
 const defaults = {
   image: '', imageName: '', dim: 0, blur: 0, surfaceOpacity: 0.78,
-  popupBlur: 20, position: 'center', size: 'cover'
+  popupBlur: 20, position: 'center', size: 'cover', enabled: false
 };
 let config = loadConfig();
-let desiredEnabled = false;
+let desiredEnabled = Boolean(config.enabled);
 const sessions = new Map();
+const clearedTargets = new Set();
 
 function loadConfig() {
   try { return { ...defaults, ...JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) }; }
@@ -65,6 +67,29 @@ async function findCodexExe() {
   return exe;
 }
 
+function psLiteral(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+async function createBackgroundShortcut() {
+  const exe = await findCodexExe();
+  if (!fs.existsSync(BACKGROUND_LAUNCHER)) throw new Error('背景模式启动器文件缺失，请重新下载完整程序。');
+  const script = [
+    '$shell=New-Object -ComObject WScript.Shell',
+    '$desktop=[Environment]::GetFolderPath(\'Desktop\')',
+    '$link=$shell.CreateShortcut((Join-Path $desktop \'Codex（背景模式）.lnk\'))',
+    `$link.TargetPath=${psLiteral(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe'))}`,
+    `$link.Arguments=${psLiteral(`"${BACKGROUND_LAUNCHER}"`)}`,
+    `$link.WorkingDirectory=${psLiteral(ROOT)}`,
+    `$link.IconLocation=${psLiteral(`${exe},0`)}`,
+    "$link.Description='通过 Codex Background Studio 启动并应用背景'",
+    '$link.Save()',
+    'Write-Output (Join-Path $desktop \'Codex（背景模式）.lnk\')'
+  ].join('; ');
+  const shortcut = await ps(script);
+  return { ok: true, shortcut };
+}
+
 async function hasCodexProcess() {
   try { return (await ps("@(Get-Process ChatGPT -ErrorAction SilentlyContinue).Count")).trim() !== '0'; }
   catch { return false; }
@@ -82,7 +107,12 @@ function debugJson(route = '/json/list') {
 }
 
 async function launchCodex() {
-  try { await debugJson('/json/version'); desiredEnabled = true; await syncTargets(); return { ok: true, reused: true }; }
+  try {
+    await debugJson('/json/version');
+    desiredEnabled = true; config.enabled = true; saveConfig();
+    await syncTargets(); broadcast(injectionSource(config));
+    return { ok: true, reused: true };
+  }
   catch { /* not launched with our debug port */ }
   if (await hasCodexProcess()) {
     throw new Error('Codex 已在运行。请先完全退出 Codex，再点击此按钮；这样才能以可注入背景的方式重新启动。');
@@ -91,7 +121,7 @@ async function launchCodex() {
   const child = spawn(exe, [`--remote-debugging-address=${HOST}`, `--remote-debugging-port=${DEBUG_PORT}`], {
     detached: true, stdio: 'ignore', windowsHide: false
   });
-  child.unref(); desiredEnabled = true;
+  child.unref(); desiredEnabled = true; config.enabled = true; saveConfig();
   for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 400));
     try { await debugJson('/json/version'); await syncTargets(); return { ok: true, reused: false }; } catch { /* retry */ }
@@ -162,6 +192,28 @@ function removalSource() {
   return `(() => { const x=window.__codexBackgroundStudio; if(x)x.destroy(); document.getElementById('codex-background-studio')?.remove(); return true; })()`;
 }
 
+function isBackgroundTarget(target) {
+  if (target.type !== 'page' || !target.webSocketDebuggerUrl) return false;
+  try {
+    const url = new URL(target.url);
+    if (url.protocol !== 'app:' || url.hostname !== '-') return false;
+    if (url.pathname === '/detached-window.html') return true;
+    if (url.pathname !== '/index.html') return false;
+    return url.searchParams.get('initialRoute') !== '/avatar-overlay';
+  } catch { return false; }
+}
+
+function clearExcludedTarget(target) {
+  if (!target.webSocketDebuggerUrl || clearedTargets.has(target.id)) return;
+  clearedTargets.add(target.id);
+  const ws = new WebSocket(target.webSocketDebuggerUrl);
+  ws.addEventListener('open', () => {
+    ws.send(JSON.stringify({ id: 1, method: 'Runtime.evaluate', params: { expression: removalSource(), awaitPromise: false } }));
+    setTimeout(() => ws.close(), 100);
+  });
+  ws.addEventListener('error', () => clearedTargets.delete(target.id));
+}
+
 function connectTarget(target) {
   if (!target.webSocketDebuggerUrl || sessions.has(target.id)) return;
   const ws = new WebSocket(target.webSocketDebuggerUrl); let seq = 0;
@@ -170,14 +222,29 @@ function connectTarget(target) {
     sessions.set(target.id, { ws, send });
     send(desiredEnabled ? injectionSource(config) : removalSource());
   });
-  ws.addEventListener('close', () => sessions.delete(target.id));
-  ws.addEventListener('error', () => sessions.delete(target.id));
+  ws.addEventListener('close', () => { if (sessions.get(target.id)?.ws === ws) sessions.delete(target.id); });
+  ws.addEventListener('error', () => { if (sessions.get(target.id)?.ws === ws) sessions.delete(target.id); });
 }
 
 async function syncTargets() {
   try {
     const targets = await debugJson();
-    targets.filter(t => t.type === 'page' && t.webSocketDebuggerUrl).forEach(connectTarget);
+    const liveIds = new Set(targets.map(target => target.id));
+    for (const target of targets) {
+      if (isBackgroundTarget(target)) {
+        clearedTargets.delete(target.id);
+        connectTarget(target);
+      } else if (target.type === 'page' && target.webSocketDebuggerUrl) {
+        const session = sessions.get(target.id);
+        if (session) {
+          session.send(removalSource());
+          session.ws.close();
+          sessions.delete(target.id);
+        }
+        clearExcludedTarget(target);
+      }
+    }
+    for (const id of clearedTargets) if (!liveIds.has(id)) clearedTargets.delete(id);
     return targets.length;
   } catch { return 0; }
 }
@@ -209,8 +276,18 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true });
     }
     if (url.pathname === '/api/start' && req.method === 'POST') return json(res, 200, await launchCodex());
+    if (url.pathname === '/api/create-shortcut' && req.method === 'POST') return json(res, 200, await createBackgroundShortcut());
+    if (url.pathname === '/api/resume' && req.method === 'POST') {
+      if (!config.image) throw new Error('尚未保存背景图片，请先打开控制面板选择图片。');
+      return json(res, 200, await launchCodex());
+    }
+    if (url.pathname === '/api/pause' && req.method === 'POST') {
+      desiredEnabled = false; config.enabled = false; saveConfig(); broadcast(removalSource());
+      return json(res, 200, { ok: true });
+    }
     if (url.pathname === '/api/restore' && req.method === 'POST') {
-      desiredEnabled = false; broadcast(removalSource()); return json(res, 200, { ok: true });
+      desiredEnabled = false; config.enabled = false; saveConfig(); broadcast(removalSource());
+      return json(res, 200, { ok: true });
     }
     let file = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
     file = path.normalize(file).replace(/^(\.\.[/\\])+/, '');

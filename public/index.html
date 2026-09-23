@@ -62,8 +62,8 @@
       <div class="row"><label>暗色遮罩 <output id="dimOut">0%</output></label><input id="dim" type="range" min="0" max="85" value="0"></div>
       <div class="row"><label>背景模糊 <output id="blurOut">0 px</output></label><input id="blur" type="range" min="0" max="24" value="0"></div>
       <div class="row"><label>图片填充</label><select id="size"><option value="cover">铺满窗口</option><option value="contain">完整显示</option><option value="auto">原始尺寸</option></select></div>
-      <div class="actions"><button class="primary" id="apply">启动 Codex 并应用</button><button class="secondary" id="restore">恢复原始界面</button></div>
-      <div class="note">首次应用前请完全退出正在运行的 Codex。工具只应用背景并移除渐变，不会更改 Codex 的主题或其他外观设置；保持此窗口的命令行程序运行，才能自动为新窗口应用背景。</div>
+      <div class="actions"><button class="primary" id="apply">启动 Codex 并应用</button><button class="secondary" id="shortcut">创建 Codex 背景模式快捷方式</button><button class="secondary" id="restore">恢复原始界面</button></div>
+      <div class="note">首次应用前请完全退出正在运行的 Codex。程序会驻留在系统托盘，无需保持命令行窗口；开机自启只启动 Background Studio，不会自动启动 Codex。需要时可从托盘菜单继续背景。</div>
     </aside>
   </div>
 </div><div class="toast" id="toast"></div>
@@ -82,6 +82,7 @@ $('#file').onchange=e=>{const f=e.target.files[0];if(!f)return;if(f.size>16*1024
 ['dim','blur'].forEach(id=>$('#'+id).oninput=syncPreview);$('#size').onchange=syncPreview;
 $('#preset').onchange=()=>{applyTheme();localStorage.setItem('codex-preview-preset',$('#preset').value)};
 $('#apply').onclick=async()=>{const b=$('#apply');b.disabled=true;b.textContent='正在启动…';try{await save();await api('/api/start',{method:'POST'});toast('背景已应用到 Codex');setTimeout(refresh,700)}catch(e){toast(e.message,true)}finally{b.disabled=false;b.textContent='启动 Codex 并应用'}};
+$('#shortcut').onclick=async()=>{const b=$('#shortcut');b.disabled=true;try{const d=await api('/api/create-shortcut',{method:'POST'});toast('桌面快捷方式已创建')}catch(e){toast(e.message,true)}finally{b.disabled=false}};
 $('#restore').onclick=async()=>{try{await api('/api/restore',{method:'POST'});toast('已恢复原始界面');refresh()}catch(e){toast(e.message,true)}};
 async function refresh(){try{const s=await api('/api/status');$('#dot').classList.toggle('on',s.connected&&s.enabled);$('#status').textContent=s.connected?(s.enabled?`已连接 · ${s.sessions} 个页面`:'已连接 · 未应用'):(s.running?'Codex 正常运行，需退出后重启':'等待启动 Codex')}catch{$('#status').textContent='本地服务异常'}}
 (async()=>{$('#preset').value=localStorage.getItem('codex-preview-preset')||'codex';try{const c=await api('/api/config');$('#dim').value=Math.round(c.dim*100);$('#blur').value=c.blur;$('#size').value=c.size;imageName=c.imageName||'';if(imageName)$('#fileName').textContent=imageName+'（已保存）';applyTheme();syncPreview()}catch{applyTheme()}refresh();setInterval(refresh,2500)})();
